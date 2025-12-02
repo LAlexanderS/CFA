@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: cfa_bot
+    command: python main.py
+    ports:
+      - "5506:5506"
+    restart: always
+    networks:
+      - my_network
+networks:
+  my_network:
+    driver: bridge
