@@ -1,15 +1,9 @@
 # Импорт библиотек
 import pandas as pd
-import numpy as np
 import sys
 import logging
 import asyncio
 import os
-import re
-import json
-import hashlib
-import time
-from datetime import datetime
 from aiogram import Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart
@@ -21,11 +15,42 @@ from aiogram.types import FSInputFile
 from aiogram.filters import Command
 from dotenv import load_dotenv
 from aiogram.types import WebAppInfo
+from aiogram.dispatcher.event.bases import SkipHandler
+
+from services.dictionaries import (
+    update_dictionaries,
+    read_table,
+    get_key_buttons_1rang,
+    get_key_buttons_text,
+    get_key_buttons_termins,
+    get_key_all_opros,
+)
+from services.pending_questions import (
+    add_pending_question,
+    get_pending_question_by_message,
+    mark_question_answered,
+)
+from services.ratings import (
+    add_rating,
+    get_ratings,
+    has_user_rated,
+    get_user_rating,
+    get_marker_from_hash,
+    store_marker_hash,
+    get_all_ratings,
+)
+from services.user_stats import record_user_activity_from_message
+from services.tildaforms import (
+    parse_tildaforms_message,
+    create_html_from_tildaforms_data,
+    save_html_temp,
+)
 
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 TOKEN_GROUP = os.getenv("TOKEN_GROUP")
+TILDAFORMS_GROUP = os.getenv("TILDAFORMS_GROUP")
 
 # # Подключение к боту
 # with open('token.txt', 'r') as file:
@@ -52,31 +77,6 @@ async def main() -> None:
 # ----------------------------------------------------------------------------------------------------------------------
 # async def read_dict():
 
-global key_buttons_1rang, key_buttons_text, key_buttons_termins, key_all_opros
-
-# Функция для инициализации/обновления словарей
-def update_dictionaries():
-    global key_buttons_1rang, key_buttons_text, key_buttons_termins, key_all_opros
-
-    structure_f = pd.read_excel(os.path.abspath('structure.xlsx'), engine='openpyxl')
-
-    # Инициализация key_buttons_1rang
-    level, marker, text_messege, buttns = structure_f[structure_f['Уровень'] == 1].iloc[0]
-    buttns = [btn.strip() for btn in buttns.strip('[]').split(']\n[')]
-    key_buttons_1rang = {}
-    for i in buttns:
-        key_buttons_1rang[i] = 2
-
-    # Инициализация остальных словарей
-    key_buttons_text = structure_f.set_index('Маркер')['Уровень'].to_dict()
-
-    key_buttons_termins = structure_f[structure_f['Маркер'] == list(key_buttons_1rang.keys())[0]]['Кнопки'].iloc[0]
-    key_buttons_termins = [btn.strip() for btn in key_buttons_termins.strip('[]').split(']\n[')]
-
-    key_all_opros = list(key_buttons_1rang.keys()) + key_buttons_termins
-
-
-# Вызов функции при старте для инициализации
 update_dictionaries()
 
 
@@ -85,272 +85,10 @@ user_context={}
 # --------------------------------Система ответов администраторов--------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
-PENDING_QUESTIONS_FILE = 'pending_questions.json'
-
-def load_pending_questions():
-    """Загружает список ожидающих ответа вопросов"""
-    if os.path.exists(PENDING_QUESTIONS_FILE):
-        try:
-            with open(PENDING_QUESTIONS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_pending_questions(questions):
-    """Сохраняет список ожидающих ответа вопросов"""
-    with open(PENDING_QUESTIONS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(questions, f, ensure_ascii=False, indent=2)
-
-def add_pending_question(user_id, question_text, group_message_id):
-    """Добавляет вопрос в список ожидающих ответа"""
-    questions = load_pending_questions()
-    question_id = f"{user_id}_{group_message_id}_{int(time.time())}"
-    questions[question_id] = {
-        'user_id': user_id,
-        'question_text': question_text,
-        'group_message_id': group_message_id,
-        'answered': False
-    }
-    save_pending_questions(questions)
-    return question_id
-
-def get_pending_question_by_message(group_message_id):
-    """Получает вопрос по ID сообщения в группе"""
-    questions = load_pending_questions()
-    for question_id, question_data in questions.items():
-        if question_data['group_message_id'] == group_message_id and not question_data.get('answered', False):
-            return question_id, question_data
-    return None, None
-
-def mark_question_answered(question_id):
-    """Отмечает вопрос как отвеченный"""
-    questions = load_pending_questions()
-    if question_id in questions:
-        questions[question_id]['answered'] = True
-        save_pending_questions(questions)
 
 # --------------------------------Система оценок------------------------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
-RATINGS_FILE = 'question_ratings.json'
-MARKER_HASH_FILE = 'marker_hash_map.json'
-USERS_STATS_FILE = 'users_stats.json'
-
-def load_ratings():
-    """Загружает оценки из файла"""
-    if os.path.exists(RATINGS_FILE):
-        try:
-            with open(RATINGS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_ratings(ratings):
-    """Сохраняет оценки в файл"""
-    with open(RATINGS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(ratings, f, ensure_ascii=False, indent=2)
-
-def load_hash_map():
-    """Загружает маппинг хеш -> маркер"""
-    if os.path.exists(MARKER_HASH_FILE):
-        try:
-            with open(MARKER_HASH_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_hash_map(hash_map):
-    """Сохраняет маппинг хеш -> маркер"""
-    with open(MARKER_HASH_FILE, 'w', encoding='utf-8') as f:
-        json.dump(hash_map, f, ensure_ascii=False, indent=2)
-
-def get_marker_hash(marker):
-    """Получает хеш маркера (короткий идентификатор для callback_data)"""
-    # Используем MD5 хеш и берем первые 16 символов (достаточно для уникальности)
-    hash_obj = hashlib.md5(marker.encode('utf-8'))
-    return hash_obj.hexdigest()[:16]
-
-def get_marker_from_hash(hash_value):
-    """Восстанавливает маркер по хешу"""
-    hash_map = load_hash_map()
-    return hash_map.get(hash_value, None)
-
-def store_marker_hash(marker):
-    """Сохраняет маппинг маркер -> хеш"""
-    hash_map = load_hash_map()
-    hash_value = get_marker_hash(marker)
-    hash_map[hash_value] = marker
-    save_hash_map(hash_map)
-    return hash_value
-
-def add_rating(marker, rating_type, user_id, username=None):
-    """Добавляет или изменяет оценку к вопросу (rating_type: 'up' или 'down')"""
-    ratings = load_ratings()
-    if marker not in ratings:
-        ratings[marker] = {'up': 0, 'down': 0, 'users': {}}
-    
-    user_id_str = str(user_id)
-    username = username or "Пользователь"
-    
-    # Проверяем, оценивал ли уже этот пользователь
-    if user_id_str in ratings[marker].get('users', {}):
-        # Пользователь уже оценил - меняем оценку
-        previous_entry = ratings[marker]['users'][user_id_str]
-        if isinstance(previous_entry, dict):
-            previous_rating = previous_entry.get('value')
-        else:
-            previous_rating = previous_entry
-        
-        # Если пользователь нажимает на ту же кнопку, ничего не делаем
-        if previous_rating == rating_type:
-            return True
-        
-        # Убираем предыдущую оценку
-        ratings[marker][previous_rating] -= 1
-        if ratings[marker][previous_rating] < 0:
-            ratings[marker][previous_rating] = 0
-    
-    # Добавляем новую оценку
-    ratings[marker][rating_type] += 1
-    if 'users' not in ratings[marker]:
-        ratings[marker]['users'] = {}
-    ratings[marker]['users'][user_id_str] = {
-        'value': rating_type,
-        'username': username
-    }
-    save_ratings(ratings)
-    return True
-
-def get_ratings(marker):
-    """Получает оценки для вопроса"""
-    ratings = load_ratings()
-    if marker not in ratings:
-        ratings[marker] = {'up': 0, 'down': 0, 'users': {}}
-
-    # Нормализуем структуру users
-    users = ratings[marker].get('users', {})
-    normalized_users = {}
-    for user_id, data in users.items():
-        if isinstance(data, dict):
-            value = data.get('value')
-            username = data.get('username')
-        else:
-            value = data
-            username = None
-        normalized_users[user_id] = {
-            'value': value,
-            'username': username
-        }
-    ratings[marker]['users'] = normalized_users
-
-    return {
-        'up': ratings[marker].get('up', 0),
-        'down': ratings[marker].get('down', 0),
-        'users': normalized_users
-    }
-
-def has_user_rated(marker, user_id):
-    """Проверяет, оценивал ли пользователь этот вопрос"""
-    ratings = load_ratings()
-    if marker not in ratings:
-        return False
-    user_id_str = str(user_id)
-    user_entry = ratings[marker].get('users', {}).get(user_id_str)
-    if user_entry is None:
-        return False
-    if isinstance(user_entry, dict):
-        return user_entry.get('value') is not None
-    return True
-
-def get_user_rating(marker, user_id):
-    """Получает оценку пользователя для вопроса"""
-    ratings = load_ratings()
-    if marker not in ratings:
-        return None
-    user_id_str = str(user_id)
-    user_entry = ratings[marker].get('users', {}).get(user_id_str)
-    if isinstance(user_entry, dict):
-        return user_entry.get('value')
-    return user_entry
-
-def get_all_ratings():
-    """Получает все оценки для администратора"""
-    return load_ratings()
-
-# --------------------------------Учет пользователей--------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
-def load_user_stats():
-    """Загружает статистику пользователей"""
-    if os.path.exists(USERS_STATS_FILE):
-        try:
-            with open(USERS_STATS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_user_stats(stats):
-    """Сохраняет статистику пользователей"""
-    with open(USERS_STATS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
-
-def record_user_activity(user_id, username=None, opened_mini_app=False):
-    """Фиксирует активность пользователя"""
-    stats = load_user_stats()
-    user_key = str(user_id)
-    now_iso = datetime.utcnow().isoformat()
-
-    entry = stats.get(user_key, {
-        'user_id': user_id,
-        'username': username,
-        'first_seen': now_iso,
-        'opened_mini_app': False
-    })
-
-    entry['username'] = username or entry.get('username') or "Пользователь"
-    entry['last_seen'] = now_iso
-    if opened_mini_app:
-        entry['opened_mini_app'] = True
-
-    stats[user_key] = entry
-    save_user_stats(stats)
-
-def record_user_activity_from_message(message: Message, opened_mini_app: bool = False):
-    """Удобный хелпер для записи активности из объекта Message"""
-    if not message or not message.from_user:
-        return
-    username = message.from_user.username or message.from_user.full_name or "Пользователь"
-    record_user_activity(message.from_user.id, username, opened_mini_app)
-
-# --------------------------------Функции-------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
-async def read_table(type_z, message):
-    structure_f = pd.read_excel(os.path.abspath('structure.xlsx'), engine='openpyxl')
-    if type_z == 1:
-        level, marker, text_messege, buttns = structure_f[structure_f['Уровень'] == 1].iloc[0]
-        return level, marker, text_messege, buttns
-    elif type_z == 2:
-        level, marker, text_messege, buttns = \
-            structure_f[(structure_f['Уровень'] == 2) & (structure_f['Маркер'] == message.text)].iloc[0]
-        return level, marker, text_messege, buttns
-    elif type_z == 3:
-        level, marker, text_messege, buttns = \
-            structure_f[structure_f['Маркер'] == 'Задать свой вопрос о ЦФА'].iloc[0]
-        return level, marker, text_messege, buttns
-    elif type_z == 4:
-        level, marker, text_messege, buttns = structure_f[structure_f['Маркер'] == message.text].iloc[0]
-        return level, marker, text_messege, buttns
-    elif type_z == 5:
-        structure_f = structure_f[~structure_f['Маркер'].isin(key_all_opros)]
-        level, marker, text_messege, buttns = structure_f[structure_f['Маркер'] == message.text].iloc[0]
-        return level, marker, text_messege, buttns
-
-
 
 # --------------------------------Загрузка структуры--------------------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
@@ -369,8 +107,7 @@ async def doc_message(message: Message, bot: Bot):
         try:
             destination = f"{document.file_name}"
             await bot.download(document, destination=destination)
-            new_structure = pd.read_excel(destination, engine='openpyxl')
-            structure = new_structure.copy()
+            pd.read_excel(destination, engine='openpyxl')
 
             # Обновляем словари после загрузки нового файла
             update_dictionaries()
@@ -398,8 +135,14 @@ async def download_command(message: Message, bot: Bot):
 # ----------------------------------------------------------------------------------------------------------------------
 @dp.message(CommandStart())  # Первый уровень
 async def cmd_start1(message: Message, bot: Bot):
+    if message.chat.type != "private":
+        await message.reply(
+            "Пожалуйста, напишите боту в личные сообщения, чтобы начать работу.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
     record_user_activity_from_message(message)
-    level, marker, text_messege, buttns = await read_table(1, message)
+    level, marker, text_messege, buttns = await read_table(1)
     builder = ReplyKeyboardBuilder()
     buttns = [btn.strip() for btn in buttns.strip('[]').split(']\n[')]
     for button_text in buttns:
@@ -437,7 +180,7 @@ async def cmd_start1(message: Message, bot: Bot):
 @router.message(F.text == 'Главная')
 async def cmd_start1(message: Message, bot: Bot):
     record_user_activity_from_message(message)
-    level, marker, text_messege, buttns = await read_table(1, message)
+    level, marker, text_messege, buttns = await read_table(1)
     builder = ReplyKeyboardBuilder()
 
     buttns = [btn.strip() for btn in buttns.strip('[]').split(']\n[')]
@@ -461,7 +204,7 @@ async def cmd_start1(message: Message, bot: Bot):
 
 
 
-@router.message(lambda message: message.text not in key_buttons_text.keys()) # Второй уровень - работа с текстом
+@router.message(lambda message: message.chat.type == "private" and message.text not in get_key_buttons_text()) # Второй уровень - работа с текстом
 async def fn_text(message: Message, bot: Bot):
     # with open('token_group.txt', 'r') as file:
     #     token_group = file.read().strip()
@@ -474,7 +217,7 @@ async def fn_text(message: Message, bot: Bot):
         last_bot_message = context.get('last_bot_message')
 
         # Получаем ожидаемый текст приглашения
-        level, marker, expected_text, buttns = await read_table(3, message)
+        level, marker, expected_text, buttns = await read_table(3)
 
         if last_bot_message == expected_text:
             username = message.from_user.username or "Пользователь"
@@ -495,7 +238,7 @@ async def fn_text(message: Message, bot: Bot):
             add_pending_question(user_id, question_text, sent_message.message_id)
             
             # Отправляем подтверждение пользователю
-            level, marker, text_messege, buttns = await read_table(3, message)
+            level, marker, text_messege, buttns = await read_table(3)
             await bot.send_message(
                 chat_id=message.chat.id,
                 text=buttns, 
@@ -507,17 +250,18 @@ async def fn_text(message: Message, bot: Bot):
         return
 
 
-@router.message(lambda message: message.text in key_buttons_1rang.keys()) # Второй уровень
+@router.message(lambda message: message.chat.type == "private" and message.text in get_key_buttons_1rang()) # Второй уровень
 async def fn_1(message: Message, bot: Bot):
     record_user_activity_from_message(message)
-    internal_command = key_buttons_1rang[message.text]
+    buttons_map = get_key_buttons_1rang()
+    internal_command = buttons_map.get(message.text)
     # print(message.text)
 
-    level, marker, text_messege, buttns = await read_table(1, message)
+    level, marker, text_messege, buttns = await read_table(1)
     buttns_list = [btn.strip() for btn in buttns.strip('[]').split(']\n[')]
 
     if internal_command == 2 and message.text != 'Задать свой вопрос о ЦФА':
-        level, marker, text_messege, buttns = await read_table(2, message)
+        level, marker, text_messege, buttns = await read_table(2, message.text)
         builder = ReplyKeyboardBuilder()
         buttns = [btn.strip() for btn in buttns.strip('[]').split(']\n[')]
         for button_text in buttns:
@@ -530,7 +274,7 @@ async def fn_1(message: Message, bot: Bot):
             text=text_messege,
             reply_markup=builder.as_markup(), parse_mode=ParseMode.HTML)
     elif internal_command == 2 and message.text == 'Задать свой вопрос о ЦФА':
-        level, marker, text_messege, buttns = await read_table(3, message)
+        level, marker, text_messege, buttns = await read_table(3)
 
         # Устанавливаем контекст для пользователя
         user_context[message.from_user.id] = {
@@ -545,11 +289,11 @@ async def fn_1(message: Message, bot: Bot):
         )
 
 
-@router.message(lambda message: message.text in key_buttons_termins) # Третий уровень ответы
+@router.message(lambda message: message.chat.type == "private" and message.text in get_key_buttons_termins()) # Третий уровень ответы
 async def fn_2(message: Message, bot: Bot):
     record_user_activity_from_message(message)
     # print('key_buttons_termins = ', message.text)
-    level, marker, text_messege, buttns = await read_table(4, message)
+    level, marker, text_messege, buttns = await read_table(4, message.text)
     # print(marker)
     
     # Создаем обычную клавиатуру для навигации
@@ -610,11 +354,11 @@ async def fn_2(message: Message, bot: Bot):
     )
 
 
-@router.message(lambda message: message.text not in key_all_opros) # Третий уровень опрос
+@router.message(lambda message: message.chat.type == "private" and message.text not in get_key_all_opros()) # Третий уровень опрос
 async def fn_3(message: Message, bot: Bot):
     record_user_activity_from_message(message)
     # print('key_all_opros = ', message.text)
-    level, marker, text_messege, buttns = await read_table(5, message)
+    level, marker, text_messege, buttns = await read_table(5, message.text)
 
     # Создаем обычную клавиатуру для навигации
     builder = ReplyKeyboardBuilder()
@@ -834,6 +578,225 @@ async def show_ratings(message: Message, bot: Bot):
 
 
 
+
+
+# --------------------------------Обработчик сообщений от TildaForms----------------------------------------------------
+# ----------------------------------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------------------------------
+# Добавляем простой обработчик для отладки - логирует ВСЕ сообщения из групп
+@dp.message(lambda m: m.chat.type in ("supergroup", "group"))
+async def debug_all_group_messages(message: Message, bot: Bot):
+    """Отладочный обработчик - логирует все сообщения из групп для диагностики"""
+    logging.info(
+        f"[DEBUG] Получено сообщение в группе: chat_id={message.chat.id}, "
+        f"chat_type={message.chat.type}, message_id={message.message_id}, "
+        f"has_text={bool(message.text)}, has_caption={bool(message.caption)}, "
+        f"from_user_id={message.from_user.id if message.from_user else None}, "
+        f"from_username={message.from_user.username if message.from_user else None}"
+    )
+    # Продолжаем обработку следующими хендлерами
+    raise SkipHandler
+
+@dp.message(lambda m: m.chat.type in ("supergroup", "group") and not m.reply_to_message)
+async def handle_tildaforms_message(message: Message, bot: Bot):
+    """Обработчик сообщений от TildaForms бота в группе"""
+    logging.info(f"[TildaForms] Получено сообщение в группе: chat_id={message.chat.id}, chat_type={message.chat.type}, message_id={message.message_id}")
+    
+    # Проверяем, что сообщение пришло из группы TildaForms
+    try:
+        # Используем TILDAFORMS_GROUP, если задан, иначе используем TOKEN_GROUP
+        target_group = TILDAFORMS_GROUP or TOKEN_GROUP
+        if not target_group:
+            logging.error(f"[TildaForms] Не указана группа для TildaForms! Установите TILDAFORMS_GROUP или TOKEN_GROUP в .env")
+            return
+        
+        group_id = int(target_group) if target_group.lstrip('-').isdigit() else None
+        if group_id is not None:
+            if message.chat.id != group_id:
+                logging.info(f"[TildaForms] Сообщение не из нужной группы: chat_id={message.chat.id}, нужна группа {group_id}")
+                return
+        else:
+            # Если группа не число, сравниваем как строки
+            if str(message.chat.id) != str(target_group):
+                logging.info(f"[TildaForms] Сообщение не из нужной группы (строки): chat_id={message.chat.id}, нужна группа {target_group}")
+                return
+    except Exception as e:
+        logging.error(f"[TildaForms] Ошибка проверки группы: {e}, chat_id={message.chat.id}, TILDAFORMS_GROUP={TILDAFORMS_GROUP}, TOKEN_GROUP={TOKEN_GROUP}")
+        return
+    
+    # Проверяем, что есть текст сообщения (может быть в text или caption)
+    text = message.text or message.caption or ""
+    
+    # Логируем всю информацию о сообщении для отладки
+    sender_info = {}
+    sender_chat_info = {}
+    
+    if message.from_user:
+        sender_info = {
+            'id': message.from_user.id,
+            'username': message.from_user.username,
+            'first_name': message.from_user.first_name,
+            'is_bot': getattr(message.from_user, 'is_bot', False)
+        }
+    
+    if message.sender_chat:
+        sender_chat_info = {
+            'id': message.sender_chat.id,
+            'title': message.sender_chat.title,
+            'username': message.sender_chat.username,
+            'type': message.sender_chat.type
+        }
+    
+    logging.info(f"[TildaForms] Детали сообщения: message_id={message.message_id}, "
+                 f"has_text={bool(message.text)}, has_caption={bool(message.caption)}, "
+                 f"text_length={len(text)}, from_user={sender_info}, sender_chat={sender_chat_info}")
+    
+    # Если нет текста, но есть документ или фото, возможно текст в caption
+    # Также проверяем, может быть это сообщение от TildaForms бота по username
+    is_tildaforms_by_username = False
+    if message.from_user:
+        username_lower = (message.from_user.username or "").lower()
+        is_tildaforms_by_username = "tildaforms" in username_lower or "tildaformsbot" in username_lower
+    
+    if message.sender_chat:
+        chat_username_lower = (message.sender_chat.username or "").lower()
+        if not is_tildaforms_by_username:
+            is_tildaforms_by_username = "tildaforms" in chat_username_lower
+    
+    if not text:
+        if is_tildaforms_by_username:
+            logging.info(f"[TildaForms] Сообщение от TildaForms бота без текста, но это может быть документ/фото. "
+                        f"has_document={bool(message.document)}, has_photo={bool(message.photo)}")
+            # Если это точно TildaForms бот, но нет текста - возможно это служебное сообщение, пропускаем
+            return
+        else:
+            logging.info(f"[TildaForms] Сообщение без текста и не от TildaForms бота, пропускаем")
+            return
+    
+    # Проверяем, что сообщение от TildaForms бота
+    # Может быть через from_user или sender_chat
+    sender_username = ""
+    sender_first_name = ""
+    sender_id = None
+    is_bot = False
+    
+    # Проверяем from_user
+    if message.from_user:
+        sender_username = (message.from_user.username or "").lower()
+        sender_first_name = (message.from_user.first_name or "").lower()
+        sender_id = message.from_user.id
+        is_bot = getattr(message.from_user, 'is_bot', False)
+    
+    # Если сообщение от канала/бота через sender_chat, проверяем его
+    if message.sender_chat and not sender_username:
+        sender_username = (message.sender_chat.username or "").lower()
+        sender_first_name = (message.sender_chat.title or "").lower()
+        sender_id = message.sender_chat.id
+    
+    logging.info(f"[TildaForms] Проверка сообщения: sender_id={sender_id}, username={sender_username}, "
+                 f"first_name={sender_first_name}, is_bot={is_bot}, text_preview={text[:200]}")
+    
+    # Проверяем формат сообщения TildaForms (должно содержать tg_user_id и другие поля)
+    text_lower = text.lower() if text else ""
+    
+    # Проверяем по username бота (TildaFormsBot обычно имеет username "tildaformsbot")
+    is_tildaforms_bot = (
+        "tildaforms" in sender_username or
+        "tildaforms" in sender_first_name or
+        "tildaformsbot" in sender_username
+    )
+    
+    # Проверяем по содержимому сообщения (только если есть текст)
+    has_tg_user_id = "tg_user_id" in text_lower if text else False
+    has_form_format = (":" in text and "\n" in text and len(text.split("\n")) >= 3) if text else False
+    
+    # Если это точно TildaForms бот по username, считаем что это сообщение от него
+    # Или если в тексте есть признаки формы
+    is_tildaforms = is_tildaforms_bot or has_tg_user_id or has_form_format
+    
+    logging.info(f"[TildaForms] Детальная проверка: is_tildaforms_bot={is_tildaforms_bot}, "
+                 f"has_tg_user_id={has_tg_user_id}, has_form_format={has_form_format}, "
+                 f"is_tildaforms={is_tildaforms}, text_exists={bool(text)}")
+    
+    logging.info(f"[TildaForms] Результат проверки на TildaForms: {is_tildaforms}")
+    
+    if not is_tildaforms:
+        # Проверяем формат формы (выносим в переменную, чтобы избежать проблемы с обратным слешем в f-string)
+        has_format = (":" in text and "\n" in text and len(text.split("\n")) >= 3) if text else False
+        logging.info(f"[TildaForms] Сообщение не распознано как TildaForms: tg_user_id в тексте={'tg_user_id' in text_lower if text else False}, "
+                     f"tildaforms в username={'tildaforms' in sender_username}, "
+                     f"формат формы={has_format}")
+        if text:
+            logging.info(f"[TildaForms] Полный текст сообщения: {text}")
+        else:
+            logging.info(f"[TildaForms] Текст сообщения отсутствует. Возможно, это служебное сообщение или сообщение в другом формате.")
+        return
+    
+    logging.info(f"[TildaForms] ✓ Получено сообщение от TildaForms: message_id={message.message_id} в группе {message.chat.id}")
+    
+    try:
+        # Парсим данные из сообщения
+        data = parse_tildaforms_message(text)
+        
+        # Проверяем, что есть данные пользователя
+        if 'tg_user_id' not in data:
+            logging.warning(f"В сообщении TildaForms нет tg_user_id: {text[:100]}")
+            return
+        
+        user_id = data.get('tg_user_id')
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            logging.error(f"Некорректный user_id: {user_id}")
+            return
+        
+        # Создаем HTML-страницу
+        html_content = create_html_from_tildaforms_data(data)
+        html_file_path = save_html_temp(html_content)
+        
+        try:
+            # Отправляем HTML-файл пользователю
+            await bot.send_document(
+                chat_id=user_id,
+                document=FSInputFile(html_file_path, filename='Заявка_на_выпуск_ЦФА.html'),
+                caption="🎉 <b>Ваша заявка на выпуск ЦФА принята!</b>\n\nСпасибо за обращение. Ваша заявка была успешно обработана.",
+                parse_mode=ParseMode.HTML
+            )
+            
+            logging.info(f"HTML-файл успешно отправлен пользователю {user_id}")
+            
+            # Уведомляем в группе, что заявка обработана
+            username = data.get('tg_username', 'Не указан')
+            first_name = data.get('tg_first_name', 'Пользователь')
+            await bot.send_message(
+                chat_id=message.chat.id,
+                reply_to_message_id=message.message_id,
+                text=f"✅ Заявка обработана! HTML-файл отправлен пользователю @{username} ({first_name}, ID: {user_id})"
+            )
+        except Exception as send_error:
+            error_msg = f"Ошибка при отправке HTML пользователю (ID: {user_id}): {str(send_error)}"
+            logging.error(error_msg)
+            await bot.send_message(
+                chat_id=message.chat.id,
+                reply_to_message_id=message.message_id,
+                text=f"❌ {error_msg}"
+            )
+        finally:
+            # Удаляем временный файл
+            try:
+                if os.path.exists(html_file_path):
+                    os.remove(html_file_path)
+            except Exception as del_error:
+                logging.warning(f"Не удалось удалить временный файл {html_file_path}: {del_error}")
+        
+    except Exception as e:
+        error_msg = f"Ошибка при обработке сообщения от TildaForms: {str(e)}"
+        logging.error(error_msg)
+        await bot.send_message(
+            chat_id=message.chat.id,
+            reply_to_message_id=message.message_id,
+            text=f"❌ {error_msg}"
+        )
 
 
 # --------------------------------Обработчик ответов администраторов----------------------------------------------------
