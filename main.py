@@ -758,8 +758,8 @@ async def handle_tildaforms_message(message: Message, bot: Bot):
             # Отправляем HTML-файл пользователю
             await bot.send_document(
                 chat_id=user_id,
-                document=FSInputFile(html_file_path, filename='Заявка_на_выпуск_ЦФА.html'),
-                caption="🎉 <b>Ваша заявка на выпуск ЦФА принята!</b>\n\nСпасибо за обращение. Ваша заявка была успешно обработана.",
+                document=FSInputFile(html_file_path, filename='Путеводитель_ЦФА.html'),
+                caption="🎉 <b>Чек-лист по выпуску ЦФА сформирован!</b>\n\nСпасибо за обращение.",
                 parse_mode=ParseMode.HTML
             )
             
